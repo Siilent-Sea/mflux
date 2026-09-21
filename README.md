@@ -15,6 +15,7 @@ Run the latest state-of-the-art generative image models locally on your Mac in n
 - [💿 Installation](#-installation)
 - [🎨 Models](#-models)
 - [✨ Features](#-features)
+- [🦄 Contributors](#-contributors)
 - [🌱 Related projects](#related-projects)
 - [🙏 Acknowledgements](#-acknowledgements)
 - [⚖️ License](#%EF%B8%8F-license)
@@ -130,6 +131,7 @@ MFLUX supports the following model families. They have different strengths and w
 |[FIBO](src/mflux/models/fibo/README.md) | Oct 2025+ | 8B | Distilled & Base | No | Very good JSON-based prompt understanding. Has edit capabilities. |
 |[SeedVR2](src/mflux/models/seedvr2/README.md) | Jun 2025 | 3B & 7B | — | No | Best upscaling model. |
 |[Qwen Image](src/mflux/models/qwen/README.md) | Aug 2025+ | 20B | Base | No | Large model (slower); strong prompt understanding and world knowledge. Has edit capabilities |
+|[Qwen Image 2.1](src/mflux/models/qwen21/README.md) | Sep 2026 | 7.1B (+8B TE) | Base | No | Single-stream block-causal DiT with a Qwen3-VL text encoder; 40-step guidance-free sampling. |
 |[Depth Pro](src/mflux/models/depth_pro/README.md) | Oct 2024 | — | — | No | Very fast and accurate depth estimation model from Apple. |
 |[FLUX.1](src/mflux/models/flux/README.md) | Aug 2024 | 12B | Distilled & Base | No (legacy) | Legacy option with decent quality. Has edit capabilities with 'Kontext' model and upscaling support via ControlNet |
 
@@ -155,6 +157,18 @@ See the [common README](src/mflux/models/common/README.md) for detailed usage an
 > [!NOTE]
 > As MFLUX supports a wide variety of CLI tools and options, the easiest way to navigate the CLI in 2026 is to use a coding agent (like [Cursor](https://cursor.com), [Claude Code](https://www.anthropic.com/claude-code), or similar). Ask questions like: “Can you help me generate an image using z-image?”
 
+
+
+
+---
+
+<a id="contributors"></a>
+
+### 🦄 Contributors
+
+<img src="https://contrib.rocks/image?repo=mflux-community/mflux" />
+
+MFlux was originally created by [Filip Strand](https://github.com/filipstrand)
 
 ---
 
