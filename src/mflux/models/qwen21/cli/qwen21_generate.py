@@ -1,5 +1,5 @@
 from mflux.callbacks.callback_manager import CallbackManager
-from mflux.cli.parser.parsers import CommandLineParser
+from mflux.cli.parser.parsers import CommandLineParser, lora_init_kwargs_from_args, open_unit_float
 from mflux.models.common.resolution.config_resolution import ConfigResolution
 from mflux.models.qwen21.latent_creator.qwen21_latent_creator import Qwen21LatentCreator
 from mflux.models.qwen21.variants.txt2img.qwen_image_21 import QwenImage21
@@ -8,21 +8,30 @@ from mflux.utils.exceptions import PromptFileReadError, StopImageGenerationExcep
 from mflux.utils.prompt_util import PromptUtil
 
 DEFAULT_MODEL = "qwen-image-2.1"
+IGNORED_OPTIONS = {"--lora-style": "Named LoRA styles are only supported by the Flux in-context CLI; use --lora."}
 
 
 def build_parser() -> CommandLineParser:
     parser = CommandLineParser(description="Generate an image using Qwen Image 2.1 model.")
     parser.add_general_arguments()
     parser.add_model_arguments(require_model_arg=False, default_model=DEFAULT_MODEL)
+    parser.add_lora_arguments()
     parser.add_image_generator_arguments(supports_metadata_config=True, supports_dimension_scale_factor=True)
     parser.add_image_to_image_arguments(required=False)
     parser.add_output_arguments()
+    parser.add_argument(
+        "--teacache-ratio",
+        type=open_unit_float,
+        default=None,
+        help="Skip the transformer on this fraction of denoise steps and reuse the previous noise prediction. Must be within (0, 1). Default: off.",
+    )
     return parser
 
 
 def main():
     parser = build_parser()
     args = parser.parse_args()
+    CommandLineParser.warn_ignored_options(IGNORED_OPTIONS)
 
     model_config = ConfigResolution.resolve_restricted(
         args.model,
@@ -35,6 +44,7 @@ def main():
         quantize=args.quantize,
         model_path=args.model_path,
         model_config=model_config,
+        **lora_init_kwargs_from_args(args),
     )
 
     memory_saver = CallbackManager.register_callbacks(
@@ -62,6 +72,7 @@ def main():
                 image_path=args.image_path,
                 num_inference_steps=args.steps,
                 image_strength=args.image_strength,
+                teacache_ratio=args.teacache_ratio,
             )
             image.save(path=args.output.format(seed=seed), export_json_metadata=args.metadata)
     except (StopImageGenerationException, PromptFileReadError) as exc:

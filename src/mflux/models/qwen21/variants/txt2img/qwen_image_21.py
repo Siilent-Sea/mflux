@@ -30,6 +30,9 @@ class QwenImage21(nn.Module):
         quantize: int | None = None,
         model_path: str | None = None,
         model_config: ModelConfig = ModelConfig.qwen_image_21(),
+        lora_paths: list[str] | None = None,
+        lora_scales: list[float] | None = None,
+        bake_lora: bool = True,
     ):
         super().__init__()
         Qwen21Initializer.init(
@@ -37,7 +40,50 @@ class QwenImage21(nn.Module):
             quantize=quantize,
             model_path=model_path,
             model_config=model_config,
+            lora_paths=lora_paths,
+            lora_scales=lora_scales,
+            bake_lora=bake_lora,
         )
+
+    @staticmethod
+    def _teacache_skip_steps(transformer: Qwen21Transformer, config: Config, ratio: float) -> frozenset[int]:
+        """TeaCache-style selection of denoise steps whose transformer call is skipped.
+
+        The timestep-embedding signal depends only on the sigma schedule, so it is
+        computed for every step up front and the ``ratio``-fraction of steps with the
+        smallest step-to-step change — inside a protected window that keeps the first
+        and last 10% of the run unskipped — reuse the previous noise instead of
+        running the transformer. (Liu et al., "Timestep Embedding Tells: It's All
+        You Need for Accelerating DiT-based Diffusion Models", ICLR 2025.)
+        """
+        if not 0 < ratio < 1:
+            raise ValueError(f"teacache_ratio must be within (0, 1), got {ratio}")
+        steps = list(config.time_steps)
+        total = len(steps)
+        if total < 10:
+            return frozenset()
+        sigmas = config.scheduler.sigmas
+        timesteps = mx.array([QwenImage21._step_timestep(sigmas, t) for t in steps], dtype=mx.float32)
+        signals = transformer.time_text_embed(timesteps)
+        mx.eval(signals)
+        signals = signals.astype(mx.float32)
+        first = steps[0]
+        low = first + total // 10  # keep the first and last 10% of the run unskipped
+        high = first + total - total // 10
+        eligible = [i for i, t in enumerate(steps) if low <= t < high]
+        if not eligible:
+            return frozenset()
+        diffs = [mx.sqrt(mx.sum(mx.square(signals[i] - signals[i - 1]))).item() for i in eligible]
+        count = min(round(ratio * total), len(eligible))
+        chosen = sorted(range(len(eligible)), key=lambda j: diffs[j])[:count]
+        return frozenset(steps[eligible[j]] for j in chosen)
+
+    @staticmethod
+    def _step_timestep(sigmas: mx.array, t: int) -> float:
+        """Mirror Qwen21Transformer._compute_timestep's int-step sigma lookup."""
+        if t < len(sigmas):
+            return float(sigmas[t])
+        return t / 1000.0 if t > 1.0 else float(t)
 
     def generate_image(
         self,
@@ -51,6 +97,7 @@ class QwenImage21(nn.Module):
         image_strength: float | None = None,
         scheduler: str = "linear",
         negative_prompt: str | None = None,
+        teacache_ratio: float | None = None,
     ) -> GeneratedImage:
         config = Config(
             width=width,
@@ -98,35 +145,53 @@ class QwenImage21(nn.Module):
         ctx = self.callbacks.start(seed=seed, prompt=prompt, config=config)
         ctx.before_loop(latents)
 
-        for t in config.time_steps:
-            try:
-                latents = config.scheduler.scale_model_input(latents, t)
-                noise = self.transformer(
-                    t=t,
-                    config=config,
-                    hidden_states=latents,
-                    encoder_hidden_states=prompt_embeds,
-                    encoder_hidden_states_mask=prompt_mask,
-                )
-                if do_true_cfg:
-                    noise_negative = self.transformer(
-                        t=t,
-                        config=config,
-                        hidden_states=latents,
-                        encoder_hidden_states=negative_prompt_embeds,
-                        encoder_hidden_states_mask=negative_prompt_mask,
+        skip_steps = (
+            QwenImage21._teacache_skip_steps(self.transformer, config, teacache_ratio)
+            if teacache_ratio is not None
+            else frozenset()
+        )
+        previous_noise: mx.array | None = None
+
+        try:
+            for t in config.time_steps:
+                try:
+                    latents = config.scheduler.scale_model_input(latents, t)
+                    if t in skip_steps and previous_noise is not None:
+                        # TeaCache-style step reuse: the timestep-embedding signal for this
+                        # step is close to the previous one, so reuse its noise prediction
+                        # and skip the transformer (and any true-CFG pass) entirely.
+                        noise = previous_noise
+                    else:
+                        noise = self.transformer(
+                            t=t,
+                            config=config,
+                            hidden_states=latents,
+                            encoder_hidden_states=prompt_embeds,
+                            encoder_hidden_states_mask=prompt_mask,
+                        )
+                        if do_true_cfg:
+                            noise_negative = self.transformer(
+                                t=t,
+                                config=config,
+                                hidden_states=latents,
+                                encoder_hidden_states=negative_prompt_embeds,
+                                encoder_hidden_states_mask=negative_prompt_mask,
+                            )
+                            noise = noise_negative + config.guidance * (noise - noise_negative)
+                        previous_noise = noise
+
+                    latents = config.scheduler.step(noise=noise, timestep=t, latents=latents)
+                    ctx.in_loop(t, latents)
+                    mx.eval(latents)
+
+                except KeyboardInterrupt:  # noqa: PERF203
+                    ctx.interruption(t, latents)
+                    raise StopImageGenerationException(
+                        f"Stopping image generation at step {t + 1}/{config.num_inference_steps}"
                     )
-                    noise = noise_negative + config.guidance * (noise - noise_negative)
-
-                latents = config.scheduler.step(noise=noise, timestep=t, latents=latents)
-                ctx.in_loop(t, latents)
-                mx.eval(latents)
-
-            except KeyboardInterrupt:  # noqa: PERF203
-                ctx.interruption(t, latents)
-                raise StopImageGenerationException(
-                    f"Stopping image generation at step {t + 1}/{config.num_inference_steps}"
-                )
+        finally:
+            # the text-prefix K/V cache is O(100 MB) per prompt: free it when the loop ends
+            self.transformer.clear_text_cache()
 
         ctx.after_loop(latents)
 
@@ -140,6 +205,8 @@ class QwenImage21(nn.Module):
             quantization=self.bits,
             generation_time=config.time_steps.format_dict["elapsed"],
             negative_prompt=negative_prompt,
+            lora_paths=self.lora_paths,
+            lora_scales=self.lora_scales,
         )
 
     def save_model(self, base_path: str) -> None:
